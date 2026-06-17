@@ -77,13 +77,28 @@ du-blueprint generate <name>.obj <name>.blueprint -t dynamic --scale 1 -s <core>
 materials. Coordinates are pre-scaled so the in-game size matches what you modelled.
 
 ## Advanced: import an Empyrion blueprint
-The **Import Empyrion Blueprint (.epb)** button converts an Empyrion ship to a mesh you can edit
-and re-export. It's optional and needs extra tooling that is **not** bundled here:
+The **Import Empyrion Blueprint** button converts an Empyrion ship to a mesh you can edit
+and re-export. Click it and the add-on scans your Empyrion library (your own saved ships **and
+your downloaded Steam Workshop blueprints**) and shows a **thumbnail gallery** built from each
+ship's in-game preview screenshot:
+
+- **Browse a grid of 30 ships at a time** with ◀ / ▶ page buttons, or **type in the search box**
+  to filter by name. Click a thumbnail to select it, then press OK to import.
+- A progress count shows in the status bar while it scans (libraries with thousands of Workshop
+  blueprints can take a moment; press Esc to cancel).
+- Imported ships are **scaled ×3 by default** (Empyrion blocks are smaller than DU voxels, so
+  most ships need roughly 3× to fit a real core). Change the factor in the import dialog, or set
+  a new default under **Empyrion import scale** in preferences.
+- The Empyrion folder is **auto-detected from Steam**; if it isn't found, set
+  **Empyrion install folder** in preferences (or hit Detect).
+- Use **Browse for .epb file…** to import an `.epb` from anywhere else instead.
+
+It's optional and needs extra tooling that is **not** bundled here:
 - **Node.js** installed, and
 - the **epb-converter** tool (a separate project). Set its `src/index.js` path in the add-on
   preferences (it auto-detects if it's somewhere under your home folder).
 
-Without these, the rest of the plugin (model → paint → export) works fine — only this button needs them.
+Without these, the rest of the plugin (model → paint → export) works fine — only import needs them.
 
 ## Roadmap
 - In-Blender voxel preview ("show me what DU will actually build").

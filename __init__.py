@@ -6,7 +6,7 @@ and export straight to a .blueprint via du-blueprint. See README.md.
 bl_info = {
     "name": "Dual Universe Blueprint Exporter",
     "author": "Emerius",
-    "version": (0, 1, 0),
+    "version": (0, 2, 0),
     "blender": (4, 2, 0),
     "location": "View3D > Sidebar (N) > DU",
     "description": "Model DU ships on a core grid and export to .blueprint",
@@ -15,10 +15,12 @@ bl_info = {
 
 import importlib
 
-from . import core_data, materials, export_obj, extract, elements, preferences, operators, panel
+from . import (core_data, materials, export_obj, extract, elements, empyrion,
+               preferences, operators, panel)
 
 # allow reload from Blender's "Reload Scripts"
-for _m in (core_data, materials, export_obj, extract, elements, preferences, operators, panel):
+for _m in (core_data, materials, export_obj, extract, elements, empyrion,
+           preferences, operators, panel):
     importlib.reload(_m)
 
 import bpy
@@ -43,7 +45,18 @@ def register():
     bpy.types.Scene.du_elem_name = bpy.props.EnumProperty(
         name="Element", items=elements.element_items,
     )
+    bpy.types.WindowManager.du_epb_selected = bpy.props.StringProperty(
+        name="Selected blueprint", description="Key of the blueprint clicked in the gallery",
+    )
+    bpy.types.WindowManager.du_epb_page = bpy.props.IntProperty(
+        name="Page", default=0, min=0,
+    )
+    bpy.types.WindowManager.du_epb_search = bpy.props.StringProperty(
+        name="Search", description="Filter blueprints by name",
+        options={"TEXTEDIT_UPDATE"}, update=empyrion.on_search_update,
+    )
     elements.register_previews()
+    empyrion.register_previews()
     for cls in _CLASSES:
         bpy.utils.register_class(cls)
 
@@ -52,9 +65,13 @@ def unregister():
     for cls in reversed(_CLASSES):
         bpy.utils.unregister_class(cls)
     elements.unregister_previews()
+    empyrion.unregister_previews()
     del bpy.types.Scene.du_core_size
     del bpy.types.Scene.du_elem_category
     del bpy.types.Scene.du_elem_name
+    del bpy.types.WindowManager.du_epb_selected
+    del bpy.types.WindowManager.du_epb_page
+    del bpy.types.WindowManager.du_epb_search
 
 
 if __name__ == "__main__":

@@ -4,7 +4,7 @@ import shutil
 
 import bpy
 
-from . import extract
+from . import empyrion, extract
 
 
 def _autodetect_exe():
@@ -99,6 +99,19 @@ class DUAddonPreferences(bpy.types.AddonPreferences):
         subtype="FILE_PATH",
         default=_autodetect_epb_js(),
     )
+    empyrion_path: bpy.props.StringProperty(
+        name="Empyrion install folder",
+        description="Your 'Empyrion - Galactic Survival' folder (its Saves/Blueprints are "
+                    "scanned to build the import gallery). Auto-detected from Steam",
+        subtype="DIR_PATH",
+        default=empyrion.autodetect_empyrion(),
+    )
+    epb_import_scale: bpy.props.FloatProperty(
+        name="Empyrion import scale",
+        description="Uniform scale applied to imported Empyrion ships. Empyrion blocks are "
+                    "smaller than DU voxels, so ships usually need ~3x to fit a real core",
+        default=3.0, min=0.1, max=20.0,
+    )
     du_up_axis: bpy.props.EnumProperty(
         name="Up axis",
         items=[
@@ -122,6 +135,10 @@ class DUAddonPreferences(bpy.types.AddonPreferences):
         row.prop(self, "epb_converter_js")
         row.operator("du.detect_epb", icon="VIEWZOOM", text="Detect")
         col.label(text="(auto-located on first import; Detect to fill manually)")
+        row = col.row(align=True)
+        row.prop(self, "empyrion_path")
+        row.operator("du.detect_empyrion", icon="VIEWZOOM", text="Detect")
+        col.prop(self, "epb_import_scale")
         col.separator()
         col.prop(self, "du_data_path")
         col.operator("du.extract_assets", icon="IMPORT")

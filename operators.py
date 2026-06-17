@@ -7,7 +7,7 @@ import tempfile
 import bpy
 import mathutils
 
-from . import core_data, elements, export_obj, extract, materials, preferences
+from . import core_data, elements, empyrion, export_obj, extract, materials, preferences
 
 CORE_BOX_NAME = "DU_CoreVolume"
 FRONT_ARROW_NAME = "DU Front (aim +Y)"
@@ -212,14 +212,150 @@ class DU_OT_detect_epb(bpy.types.Operator):
         return {"FINISHED"}
 
 
+def _do_epb_import(self, context, epb, scale, smooth):
+    """Shared core: convert an .epb via epb-converter, import the OBJ, map DU
+    materials, and scale the ship. Reports through ``self``. Returns a Blender
+    operator result set."""
+    pr = preferences.prefs(context)
+    if not epb or not os.path.isfile(epb):
+        self.report({"ERROR"}, "No .epb file selected.")
+        return {"CANCELLED"}
+    js = bpy.path.abspath(pr.epb_converter_js) if pr.epb_converter_js else ""
+    if not js or not os.path.isfile(js):
+        js = preferences.find_epb_js()          # auto-locate on disk
+        if js:
+            pr.epb_converter_js = js            # remember it
+    if not js or not os.path.isfile(js):
+        self.report({"ERROR"}, "epb-converter not found. Set its src/index.js path in preferences.")
+        return {"CANCELLED"}
+
+    out_obj = os.path.join(tempfile.gettempdir(), "du_epb_import.obj")
+    node = bpy.path.abspath(pr.node_path) if os.path.sep in pr.node_path else pr.node_path
+    env = os.environ.copy()
+    if smooth:
+        env["EPB_GREY_DENOISE"] = "1"
+    try:
+        res = subprocess.run([node, js, epb, out_obj], env=env,
+                             capture_output=True, text=True, timeout=600)
+    except Exception as exc:  # noqa: BLE001
+        self.report({"ERROR"}, f"Could not run Node/epb-converter: {exc}")
+        return {"CANCELLED"}
+    if res.returncode != 0 or not os.path.isfile(out_obj):
+        tail = (res.stderr or res.stdout or "").strip().splitlines()
+        self.report({"ERROR"}, "epb-converter failed: " + (tail[-1] if tail else "no output"))
+        print("\n".join(tail))
+        return {"CANCELLED"}
+
+    before = set(context.scene.objects)
+    bpy.ops.wm.obj_import(filepath=out_obj)
+    imported = [o for o in context.scene.objects if o not in before]
+
+    # map each imported group (named mat_<color>) to the DU palette material
+    materials.ensure_palette()
+    for obj in imported:
+        color = obj.name.split(".")[0].replace("mat_", "")
+        mat = bpy.data.materials.get(materials.material_name(color))
+        if mat and obj.type == "MESH":
+            obj.data.materials.clear()
+            obj.data.materials.append(mat)
+
+    # scale the ship up (Empyrion blocks < DU voxels). obj_import places every
+    # group at the world origin with absolute verts, so scaling each mesh about
+    # its own (origin-at-0) local space scales the whole ship coherently.
+    if scale and abs(scale - 1.0) > 1e-6:
+        S = mathutils.Matrix.Diagonal((scale, scale, scale, 1.0))
+        done = set()
+        for obj in imported:
+            if obj.type == "MESH" and obj.data.name not in done:
+                obj.data.transform(S)
+                obj.data.update()
+                done.add(obj.data.name)
+
+    self.report({"INFO"}, f"Imported {len(imported)} object(s) from {os.path.basename(epb)} "
+                          f"at {scale:g}x. Tweak, then export.")
+    return {"FINISHED"}
+
+
+def _open_later(which):
+    """Return a bpy.app.timers callback that opens the gallery / file browser once,
+    from a normal context (so a modal scan can hand off to a popup safely)."""
+    def _fn():
+        try:
+            if which == "gallery":
+                bpy.ops.du.import_epb_gallery("INVOKE_DEFAULT")
+            else:
+                bpy.ops.du.import_epb_file("INVOKE_DEFAULT")
+        except Exception as exc:  # noqa: BLE001
+            print("DU import: could not open dialog:", exc)
+        return None  # don't reschedule
+    return _fn
+
+
 class DU_OT_import_epb(bpy.types.Operator):
     bl_idname = "du.import_epb"
-    bl_label = "Import Empyrion Blueprint (.epb)"
-    bl_description = "Convert an Empyrion .epb to a mesh (via epb-converter) and import it to edit/export"
+    bl_label = "Import Empyrion Blueprint"
+    bl_description = ("Scan your Empyrion blueprints (saved + Steam Workshop) and pick one "
+                      "from a searchable thumbnail gallery to import")
+    bl_options = {"REGISTER"}
+
+    _timer = None
+    _gen = None
+    _count = 0
+
+    def invoke(self, context, event):
+        pr = preferences.prefs(context)
+        context.window_manager.du_epb_search = ""    # start unfiltered
+        # scan incrementally so the UI stays responsive and shows progress
+        self._gen = empyrion.scan_iter(pr.empyrion_path)
+        self._count = 0
+        wm = context.window_manager
+        self._timer = wm.event_timer_add(0.01, window=context.window)
+        wm.modal_handler_add(self)
+        context.window.cursor_modal_set("WAIT")
+        context.workspace.status_text_set("Scanning Empyrion blueprints… 0 found")
+        return {"RUNNING_MODAL"}
+
+    def modal(self, context, event):
+        if event.type == "ESC":
+            self._end(context)
+            self.report({"INFO"}, "Blueprint scan cancelled.")
+            return {"CANCELLED"}
+        if event.type == "TIMER":
+            # process a few batches per tick, then yield to let the UI redraw
+            try:
+                for _ in range(3):
+                    self._count = next(self._gen)
+                context.workspace.status_text_set(
+                    f"Scanning Empyrion blueprints… {self._count} found (Esc to cancel)")
+            except StopIteration as stop:
+                total = stop.value if stop.value is not None else self._count
+                self._end(context)
+                bpy.app.timers.register(_open_later("gallery" if total else "file"),
+                                        first_interval=0.0)
+                if not total:
+                    self.report({"WARNING"},
+                                "No Empyrion blueprints found. Set the Empyrion folder in "
+                                "preferences, or use 'Browse for .epb file'.")
+                else:
+                    self.report({"INFO"}, f"Found {total} Empyrion blueprint(s).")
+                return {"FINISHED"}
+        return {"RUNNING_MODAL"}
+
+    def _end(self, context):
+        wm = context.window_manager
+        if self._timer is not None:
+            wm.event_timer_remove(self._timer)
+            self._timer = None
+        context.window.cursor_modal_restore()
+        context.workspace.status_text_set(None)
+
+
+class DU_OT_import_epb_gallery(bpy.types.Operator):
+    bl_idname = "du.import_epb_gallery"
+    bl_label = "Choose Empyrion Blueprint"
+    bl_description = "Pick a scanned Empyrion blueprint from the thumbnail gallery and import it"
     bl_options = {"REGISTER", "UNDO"}
 
-    filepath: bpy.props.StringProperty(subtype="FILE_PATH")
-    filter_glob: bpy.props.StringProperty(default="*.epb", options={"HIDDEN"})
     smooth_grey_speckle: bpy.props.BoolProperty(
         name="Smooth grey speckle",
         description="Consolidate finely-intermixed grey shades into coherent regions "
@@ -227,57 +363,141 @@ class DU_OT_import_epb(bpy.types.Operator):
                     "ships with intentional two-tone panelling/bands",
         default=False,
     )
+    import_scale: bpy.props.FloatProperty(
+        name="Import scale",
+        description="Uniform scale applied to the imported ship (~3x fits a real DU core)",
+        default=3.0, min=0.1, max=20.0,
+    )
 
     def invoke(self, context, event):
+        self.import_scale = preferences.prefs(context).epb_import_scale
+        wm = context.window_manager
+        wm.du_epb_page = 0
+        wm.du_epb_selected = ""
+        return wm.invoke_props_dialog(self, width=720)
+
+    def draw(self, context):
+        layout = self.layout
+        wm = context.window_manager
+        items, page, n_pages, total = empyrion.page_view(context, empyrion.PER_PAGE)
+
+        # search + pager
+        top = layout.row(align=True)
+        top.prop(wm, "du_epb_search", text="", icon="VIEWZOOM")
+        pager = top.row(align=True)
+        pager.enabled = n_pages > 1
+        pager.operator("du.epb_page", text="", icon="TRIA_LEFT").delta = -1
+        pager.label(text=f"Page {page + 1}/{n_pages}")
+        pager.operator("du.epb_page", text="", icon="TRIA_RIGHT").delta = 1
+        sub = f" matching {wm.du_epb_search!r}" if wm.du_epb_search else ""
+        layout.label(text=f"{total} blueprint(s){sub} — click one to select")
+
+        # thumbnail grid (PER_PAGE visible at once)
+        if items:
+            grid = layout.grid_flow(row_major=True, columns=empyrion.GRID_COLUMNS,
+                                    even_columns=True, even_rows=True, align=True)
+            for key, name, _epb, icon in items:
+                cell = grid.column(align=True)
+                selected = (key == wm.du_epb_selected)
+                if icon:
+                    cell.template_icon(icon_value=icon, scale=5.0)
+                else:
+                    cell.label(text="", icon="IMAGE_DATA")
+                op = cell.operator("du.pick_epb", text=name if len(name) <= 18 else name[:17] + "…",
+                                   depress=selected)
+                op.key = key
+        else:
+            layout.label(text="No blueprints match your search.", icon="INFO")
+
+        # selection + import options
+        layout.separator()
+        sel = empyrion.name_for(wm.du_epb_selected)
+        layout.label(text=f"Selected: {sel}" if sel else "Selected: (click a ship above)",
+                     icon="CHECKMARK" if sel else "INFO")
+        layout.prop(self, "import_scale")
+        layout.prop(self, "smooth_grey_speckle")
+
+    def execute(self, context):
+        key = context.window_manager.du_epb_selected
+        epb = empyrion.epb_path_for(key)
+        if not epb:
+            self.report({"ERROR"}, "Click a blueprint in the gallery first.")
+            return {"CANCELLED"}
+        return _do_epb_import(self, context, epb, self.import_scale, self.smooth_grey_speckle)
+
+
+class DU_OT_pick_epb(bpy.types.Operator):
+    bl_idname = "du.pick_epb"
+    bl_label = "Select Blueprint"
+    bl_description = "Select this blueprint (then adjust scale and press OK to import)"
+    bl_options = {"REGISTER", "INTERNAL"}
+
+    key: bpy.props.StringProperty()
+
+    def execute(self, context):
+        context.window_manager.du_epb_selected = self.key
+        return {"FINISHED"}
+
+
+class DU_OT_epb_page(bpy.types.Operator):
+    bl_idname = "du.epb_page"
+    bl_label = "Gallery Page"
+    bl_description = "Show the previous / next page of blueprints"
+    bl_options = {"REGISTER", "INTERNAL"}
+
+    delta: bpy.props.IntProperty(default=1)
+
+    def execute(self, context):
+        wm = context.window_manager
+        _items, _page, n_pages, _total = empyrion.page_view(context, empyrion.PER_PAGE)
+        wm.du_epb_page = max(0, min(wm.du_epb_page + self.delta, n_pages - 1))
+        return {"FINISHED"}
+
+
+class DU_OT_import_epb_file(bpy.types.Operator):
+    bl_idname = "du.import_epb_file"
+    bl_label = "Import Empyrion Blueprint (browse)"
+    bl_description = "Browse for an Empyrion .epb file anywhere on disk and import it"
+    bl_options = {"REGISTER", "UNDO"}
+
+    filepath: bpy.props.StringProperty(subtype="FILE_PATH")
+    filter_glob: bpy.props.StringProperty(default="*.epb", options={"HIDDEN"})
+    smooth_grey_speckle: bpy.props.BoolProperty(
+        name="Smooth grey speckle",
+        description="Consolidate finely-intermixed grey shades into coherent regions",
+        default=False,
+    )
+    import_scale: bpy.props.FloatProperty(
+        name="Import scale",
+        description="Uniform scale applied to the imported ship (~3x fits a real DU core)",
+        default=3.0, min=0.1, max=20.0,
+    )
+
+    def invoke(self, context, event):
+        self.import_scale = preferences.prefs(context).epb_import_scale
         context.window_manager.fileselect_add(self)
         return {"RUNNING_MODAL"}
 
     def execute(self, context):
+        return _do_epb_import(self, context, bpy.path.abspath(self.filepath),
+                              self.import_scale, self.smooth_grey_speckle)
+
+
+class DU_OT_detect_empyrion(bpy.types.Operator):
+    bl_idname = "du.detect_empyrion"
+    bl_label = "Detect"
+    bl_description = "Auto-detect the Empyrion install folder from Steam"
+    bl_options = {"REGISTER"}
+
+    def execute(self, context):
+        p = empyrion.autodetect_empyrion()
+        if not p:
+            self.report({"WARNING"}, "Empyrion install not found — set the folder manually.")
+            return {"CANCELLED"}
         pr = preferences.prefs(context)
-        epb = bpy.path.abspath(self.filepath)
-        if not epb or not os.path.isfile(epb):
-            self.report({"ERROR"}, "Pick a .epb file.")
-            return {"CANCELLED"}
-        js = bpy.path.abspath(pr.epb_converter_js) if pr.epb_converter_js else ""
-        if not js or not os.path.isfile(js):
-            js = preferences.find_epb_js()          # auto-locate on disk
-            if js:
-                pr.epb_converter_js = js            # remember it
-        if not js or not os.path.isfile(js):
-            self.report({"ERROR"}, "epb-converter not found. Set its src/index.js path in preferences.")
-            return {"CANCELLED"}
-
-        out_obj = os.path.join(tempfile.gettempdir(), "du_epb_import.obj")
-        node = bpy.path.abspath(pr.node_path) if os.path.sep in pr.node_path else pr.node_path
-        env = os.environ.copy()
-        if self.smooth_grey_speckle:
-            env["EPB_GREY_DENOISE"] = "1"
-        try:
-            res = subprocess.run([node, js, epb, out_obj], env=env,
-                                 capture_output=True, text=True, timeout=600)
-        except Exception as exc:  # noqa: BLE001
-            self.report({"ERROR"}, f"Could not run Node/epb-converter: {exc}")
-            return {"CANCELLED"}
-        if res.returncode != 0 or not os.path.isfile(out_obj):
-            tail = (res.stderr or res.stdout or "").strip().splitlines()
-            self.report({"ERROR"}, "epb-converter failed: " + (tail[-1] if tail else "no output"))
-            print("\n".join(tail))
-            return {"CANCELLED"}
-
-        before = set(context.scene.objects)
-        bpy.ops.wm.obj_import(filepath=out_obj)
-        imported = [o for o in context.scene.objects if o not in before]
-
-        # map each imported group (named mat_<color>) to the DU palette material
-        materials.ensure_palette()
-        for obj in imported:
-            color = obj.name.split(".")[0].replace("mat_", "")
-            mat = bpy.data.materials.get(materials.material_name(color))
-            if mat and obj.type == "MESH":
-                obj.data.materials.clear()
-                obj.data.materials.append(mat)
-        self.report({"INFO"}, f"Imported {len(imported)} object(s) from {os.path.basename(epb)}. "
-                              f"Scale to taste, then export.")
+        pr.empyrion_path = p
+        n = empyrion.refresh(p)
+        self.report({"INFO"}, f"Empyrion: {p}  ({n} blueprint(s))")
         return {"FINISHED"}
 
 
@@ -305,4 +525,6 @@ class DU_OT_extract_assets(bpy.types.Operator):
 
 
 CLASSES = (DU_OT_setup_core, DU_OT_make_palette, DU_OT_export_blueprint,
-           DU_OT_add_placeholder, DU_OT_extract_assets, DU_OT_import_epb, DU_OT_detect_epb)
+           DU_OT_add_placeholder, DU_OT_extract_assets, DU_OT_import_epb,
+           DU_OT_import_epb_gallery, DU_OT_pick_epb, DU_OT_epb_page,
+           DU_OT_import_epb_file, DU_OT_detect_epb, DU_OT_detect_empyrion)

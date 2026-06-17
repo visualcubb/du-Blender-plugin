@@ -48,7 +48,8 @@ class DU_PT_panel(bpy.types.Panel):
 
         box = layout.box()
         box.label(text="Import / Export", icon="EXPORT")
-        box.operator("du.import_epb", icon="IMPORT")
+        box.operator("du.import_epb", icon="IMAGE_DATA", text="Import Empyrion Blueprint")
+        box.operator("du.import_epb_file", icon="FILEBROWSER", text="Browse for .epb file…")
         box.operator("du.export_blueprint", icon="FILE_BLEND")
 
 
