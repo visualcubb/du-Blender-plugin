@@ -12,9 +12,10 @@ check element fitment, and import the result.
 
 ## See it in action
 
-**1. Import an Empyrion blueprint straight into Blender** (or model from scratch):
+**1. Model your ship in Blender** (shown here is a hull brought in via the optional Empyrion
+importer — see [Advanced](#advanced-import-an-empyrion-blueprint)):
 
-![Imported Empyrion ship in Blender](docs/01-import-epb.png)
+![A ship in Blender](docs/01-import-epb.png)
 
 **2. Place real DU elements as fitment guides** — every category, with the real in-game
 icons and readable names, sized to the actual part dimensions:
@@ -37,14 +38,17 @@ icons and readable names, sized to the actual part dimensions:
 - **One-click export** to a `.blueprint` you import in DU. **1 Blender metre = 1 DU metre.**
 
 ## Requirements
-- **Blender 4.2+**
+- **Blender 4.2+** (works on 5.x).
+- **Windows** — the `du-blueprint` engine is a Windows `.exe`.
 - **`du-blueprint` engine** (the voxelizer/exporter). Download `du-blueprint.exe` from this
   repo's [Releases](../../releases) and note where you save it.
 - **Dual Universe installed** — element dimensions and icons are read from your own install
   on first run (nothing is bundled or uploaded).
+- *(Optional, for Empyrion import only)* **Node.js** + the **epb-converter** tool — see
+  [Advanced](#advanced-import-an-empyrion-blueprint). Not needed to model and export normally.
 
 ## Install
-1. Download `du-ship-builder.zip` from [Releases](../../releases).
+1. Download the add-on `.zip` from [Releases](../../releases) (and `du-blueprint.exe` while you're there).
 2. Blender → **Edit → Preferences → Add-ons → ▾ → Install from Disk…** → select the zip.
 3. Enable **"Dual Universe Blueprint Exporter."**
 4. Expand its preferences and set:
@@ -71,6 +75,15 @@ du-blueprint generate <name>.obj <name>.blueprint -t dynamic --scale 1 -s <core>
 
 `du-blueprint` dual-contours the mesh, bakes the LOD pyramid, picks/uses the core, and assigns
 materials. Coordinates are pre-scaled so the in-game size matches what you modelled.
+
+## Advanced: import an Empyrion blueprint
+The **Import Empyrion Blueprint (.epb)** button converts an Empyrion ship to a mesh you can edit
+and re-export. It's optional and needs extra tooling that is **not** bundled here:
+- **Node.js** installed, and
+- the **epb-converter** tool (a separate project). Set its `src/index.js` path in the add-on
+  preferences (it auto-detects if it's somewhere under your home folder).
+
+Without these, the rest of the plugin (model → paint → export) works fine — only this button needs them.
 
 ## Roadmap
 - In-Blender voxel preview ("show me what DU will actually build").
