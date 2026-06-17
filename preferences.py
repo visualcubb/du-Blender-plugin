@@ -109,8 +109,16 @@ class DUAddonPreferences(bpy.types.AddonPreferences):
     epb_import_scale: bpy.props.FloatProperty(
         name="Empyrion import scale",
         description="Uniform scale applied to imported Empyrion ships. Empyrion blocks are "
-                    "smaller than DU voxels, so ships usually need ~3x to fit a real core",
-        default=3.0, min=0.1, max=20.0,
+                    "smaller than DU voxels, so ships usually need ~1.5x to fit a real core",
+        default=1.5, min=0.1, max=20.0,
+    )
+    hollow_shell: bpy.props.IntProperty(
+        name="Hollow interior (shell voxels)",
+        description="Leave the inside of the ship hollow on export, keeping only this many "
+                    "voxels of solid honeycomb at every surface (0 = fully solid). Saves a lot "
+                    "of mass/material on thick or solid-built hulls; the outer shape and the "
+                    "silhouette at distance are unchanged. Thin walls (<= 2x this) stay solid",
+        default=2, min=0, max=2,
     )
     du_up_axis: bpy.props.EnumProperty(
         name="Up axis",
@@ -127,6 +135,7 @@ class DUAddonPreferences(bpy.types.AddonPreferences):
         if not self.exe_path:
             col.label(text="du-blueprint.exe not found — set the path above.", icon="ERROR")
         col.prop(self, "scale")
+        col.prop(self, "hollow_shell")
         col.prop(self, "du_up_axis")
         col.separator()
         col.label(text="EPB import (Empyrion blueprints) — optional, needs Node.js:")

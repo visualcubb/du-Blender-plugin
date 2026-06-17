@@ -12,14 +12,16 @@ subset (type to search) with thumbnails loaded lazily only for what's displayed.
 """
 import os
 import re
+import struct
 
 import bpy
 import bpy.utils.previews
 
 EMPYRION_APPID = "383120"
-GRID_COLUMNS = 5        # thumbnails per row in the gallery
-GRID_ROWS = 6           # rows per page  ->  30 ships visible at once
+GRID_COLUMNS = 4        # thumbnails per row in the gallery
+GRID_ROWS = 3           # rows per page  ->  12 ships visible at once (bigger images)
 PER_PAGE = GRID_COLUMNS * GRID_ROWS
+THUMB_SCALE = 9.0       # template_icon size (UI units)
 
 _PREVIEWS = None
 _BP_ALL = None          # full list [(key, name, epb, preview)]
@@ -75,9 +77,10 @@ def _steam_libraries():
     cands += [r"C:\Program Files (x86)\Steam", r"C:\Program Files\Steam"]
     for c in cands:
         c = os.path.normpath(c)
-        if c in seen or not os.path.isdir(c):
+        key = os.path.normcase(c)            # case-insensitive on Windows
+        if key in seen or not os.path.isdir(c):
             continue
-        seen.add(c)
+        seen.add(key)
         roots.append(c)
         vdf = os.path.join(c, "steamapps", "libraryfolders.vdf")
         if os.path.isfile(vdf):
@@ -86,8 +89,9 @@ def _steam_libraries():
                     txt = fh.read()
                 for m in re.finditer(r'"path"\s*"([^"]+)"', txt):
                     p = os.path.normpath(m.group(1).replace("\\\\", "\\"))
-                    if p not in seen and os.path.isdir(p):
-                        seen.add(p)
+                    pk = os.path.normcase(p)
+                    if pk not in seen and os.path.isdir(p):
+                        seen.add(pk)
                         roots.append(p)
             except OSError:
                 pass
@@ -134,8 +138,9 @@ def _workshop_roots(empyrion_path):
     out, seen = [], set()
     for r in roots:
         r = os.path.normpath(r)
-        if r not in seen and os.path.isdir(r):
-            seen.add(r)
+        key = os.path.normcase(r)
+        if key not in seen and os.path.isdir(r):
+            seen.add(key)
             out.append(r)
     return out
 
@@ -159,7 +164,9 @@ def scan_iter(empyrion_path, batch=400):
     global _BP_ALL, _BP_INDEX, _BP_PREV, _BP_ITEMS
     register_previews()
     _BP_ALL, _BP_INDEX, _BP_PREV, _BP_ITEMS = [], {}, {}, None
+    _SIZE_CACHE.clear()
     keys = set()
+    seen_epb = set()        # guard against the same file via overlapping roots
     processed = 0
     for root in _scan_roots(empyrion_path):
         for dirpath, _dirs, filenames in os.walk(root):
@@ -169,6 +176,10 @@ def scan_iter(empyrion_path, batch=400):
                     continue
                 name = fn[:-4]
                 epb = os.path.join(dirpath, fn)
+                epb_key = os.path.normcase(os.path.abspath(epb))
+                if epb_key in seen_epb:
+                    continue
+                seen_epb.add(epb_key)
                 prev = None
                 for ext in (".jpg", ".jpeg", ".png"):
                     if (name + ext).lower() in fileset:
@@ -215,18 +226,37 @@ def _icon_for(key):
 
 
 def _filtered(context):
-    """All blueprints matching the current search box (whole list, no paging)."""
+    """Blueprints matching the current gallery filters (search + preview toggle).
+    Whole list, no paging."""
     if _BP_ALL is None:
         from . import preferences
         try:
             refresh(preferences.prefs(context).empyrion_path)
         except Exception:  # noqa: BLE001
             pass
-    search = (getattr(context.window_manager, "du_epb_search", "") or "").strip().lower()
+    wm = context.window_manager
     pool = _BP_ALL or []
+    # by default hide imageless prefab/scenario packs (no in-game screenshot)
+    if not getattr(wm, "du_epb_show_all", False):
+        pool = [t for t in pool if t[3]]          # t[3] = preview path
+    # optionally hide ships that won't fit the selected core
+    if getattr(wm, "du_epb_fit_only", False):
+        from . import core_data, preferences
+        scn = context.scene
+        if scn.du_core_size != "AUTO":
+            build = core_data.core_build_m(scn.du_core_size)
+            sc = preferences.prefs(context).epb_import_scale
+            pool = [t for t in pool if fits_core(t[2], sc, build)]   # t[2] = epb path
+    search = (getattr(wm, "du_epb_search", "") or "").strip().lower()
     if search:
         pool = [t for t in pool if search in t[1].lower()]
     return pool
+
+
+def counts():
+    """(with_preview, total) across the whole index."""
+    pool = _BP_ALL or []
+    return sum(1 for t in pool if t[3]), len(pool)
 
 
 def page_view(context, per_page):
@@ -247,6 +277,56 @@ def name_for(key):
         if k == key:
             return name
     return ""
+
+
+# --- ship size (read straight from the .epb header) -------------------------
+# EPB header: magic(u32 LE)=0x78945245, version(i32), type(u8), w/h/d(i32 each).
+# Empyrion block sizes: SV/HV = 0.5 m, Base/CV/Voxel = 2 m. The converter writes
+# the OBJ in Empyrion metres, and the add-on then scales by the import scale, so
+# DU metres = blocks * block_size * import_scale.
+_EPB_MAGIC = 0x78945245
+_BLOCK_SIZE_M = {0: 2.0, 2: 2.0, 4: 0.5, 8: 2.0, 16: 0.5}   # by type id
+_SIZE_CACHE = {}
+
+
+def _read_epb_dims(epb):
+    """(type_id, w, h, d) in blocks from the .epb header, or None."""
+    try:
+        with open(epb, "rb") as fh:
+            head = fh.read(21)
+    except OSError:
+        return None
+    if len(head) < 21 or struct.unpack_from("<I", head, 0)[0] != _EPB_MAGIC:
+        return None
+    typ = head[8]
+    w, h, d = struct.unpack_from("<iii", head, 9)
+    if min(w, h, d) < 0 or max(w, h, d) > 100000:
+        return None
+    return typ, w, h, d
+
+
+def du_size_m(epb, import_scale):
+    """Estimated (x, y, z) size in DU metres after import, or None if unreadable."""
+    if not epb:
+        return None
+    dims = _SIZE_CACHE.get(epb)
+    if dims is None:
+        dims = _read_epb_dims(epb) or False
+        _SIZE_CACHE[epb] = dims
+    if not dims:
+        return None
+    typ, w, h, d = dims
+    f = _BLOCK_SIZE_M.get(typ, 2.0) * float(import_scale)
+    return (w * f, h * f, d * f)
+
+
+def fits_core(epb, import_scale, build_m):
+    """True if the ship's largest dimension fits inside the core's build cube.
+    Unknown sizes are treated as fitting (don't hide them)."""
+    s = du_size_m(epb, import_scale)
+    if not s:
+        return True
+    return max(s) <= build_m + 1e-6
 
 
 def on_search_update(self, context):

@@ -17,6 +17,7 @@ class DU_PT_panel(bpy.types.Panel):
 
         box = layout.box()
         box.label(text="Core", icon="MESH_CUBE")
+        box.prop(scene, "du_construct_type", text="Type")
         box.prop(scene, "du_core_size", text="Size")
         edge = core_data.core_build_m(scene.du_core_size) if scene.du_core_size != "AUTO" else 0
         if edge:

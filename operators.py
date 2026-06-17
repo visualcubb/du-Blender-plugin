@@ -30,7 +30,7 @@ def _scene_mesh_objects(context):
 class DU_OT_setup_core(bpy.types.Operator):
     bl_idname = "du.setup_core"
     bl_label = "Set Up DU Core"
-    bl_description = "Create the build-volume guide box for the chosen core and set metric/0.25 m snapping"
+    bl_description = "Create the build-volume guide box for the chosen core and set metric units (grid snapping available via the magnet, off by default)"
     bl_options = {"REGISTER", "UNDO"}
 
     def execute(self, context):
@@ -38,13 +38,17 @@ class DU_OT_setup_core(bpy.types.Operator):
         size_name = scene.du_core_size
         edge = core_data.core_build_m(size_name)
 
-        # metric units, 0.25 m grid snap
+        # metric units. Configure grid-increment snapping but DON'T force it on —
+        # otherwise everything (including element placeholders) is locked to 1 m steps.
+        # The user can toggle the magnet when they want the hull on the grid; the
+        # exporter voxelizes to DU's 0.25 m grid regardless of exact placement.
         scene.unit_settings.system = "METRIC"
         scene.unit_settings.scale_length = 1.0
         ts = context.tool_settings
-        ts.use_snap = True
-        if "INCREMENT" not in ts.snap_elements:
-            ts.snap_elements = {"INCREMENT"}
+        ts.use_snap = False
+        ts.snap_elements = {"INCREMENT"}
+        if hasattr(ts, "use_snap_grid_absolute"):
+            ts.use_snap_grid_absolute = True
 
         # (re)build the wireframe build-volume box centred on origin
         old = bpy.data.objects.get(CORE_BOX_NAME)
@@ -139,15 +143,21 @@ class DU_OT_export_blueprint(bpy.types.Operator):
         dims = export_obj.model_bounds_m(objs, up_axis=pr.du_up_axis)
 
         name = os.path.splitext(os.path.basename(bp_path))[0]
+        construct = getattr(context.scene, "du_construct_type", "dynamic")
         cmd = [exe, "generate", obj_path, bp_path,
-               "-t", "dynamic", "--scale", str(pr.scale), "-n", name]
+               "-t", construct, "--scale", str(pr.scale), "-n", name]
         # honour the chosen core size (>= M); omit for auto if set to AUTO.
         # du-blueprint expects a lowercase size token (m/l/xl/...).
         if context.scene.du_core_size != "AUTO":
             cmd += ["-s", context.scene.du_core_size.lower()]
 
+        # Hollow the interior (leave only an N-voxel solid shell) to save mass/material.
+        env = os.environ.copy()
+        if getattr(pr, "hollow_shell", 0) > 0:
+            env["DU_HOLLOW_SHELL"] = str(pr.hollow_shell)
+
         try:
-            res = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+            res = subprocess.run(cmd, capture_output=True, text=True, timeout=600, env=env)
         except Exception as exc:  # noqa: BLE001
             self.report({"ERROR"}, f"du-blueprint failed to launch: {exc}")
             return {"CANCELLED"}
@@ -212,7 +222,7 @@ class DU_OT_detect_epb(bpy.types.Operator):
         return {"FINISHED"}
 
 
-def _do_epb_import(self, context, epb, scale, smooth):
+def _do_epb_import(self, context, epb, scale, smooth, split_by_shape=False):
     """Shared core: convert an .epb via epb-converter, import the OBJ, map DU
     materials, and scale the ship. Reports through ``self``. Returns a Blender
     operator result set."""
@@ -234,6 +244,8 @@ def _do_epb_import(self, context, epb, scale, smooth):
     env = os.environ.copy()
     if smooth:
         env["EPB_GREY_DENOISE"] = "1"
+    if split_by_shape:
+        env["EPB_SPLIT_BY_SHAPE"] = "1"
     try:
         res = subprocess.run([node, js, epb, out_obj], env=env,
                              capture_output=True, text=True, timeout=600)
@@ -250,14 +262,25 @@ def _do_epb_import(self, context, epb, scale, smooth):
     bpy.ops.wm.obj_import(filepath=out_obj)
     imported = [o for o in context.scene.objects if o not in before]
 
-    # map each imported group (named mat_<color>) to the DU palette material
+    # remap every material slot (named mat_<color>) to the DU palette material.
+    # Works for both layouts: color split (one slot, object named mat_<color>) and
+    # shape split (object named shape_<Shape>, several mat_<color> slots per object).
     materials.ensure_palette()
     for obj in imported:
-        color = obj.name.split(".")[0].replace("mat_", "")
-        mat = bpy.data.materials.get(materials.material_name(color))
-        if mat and obj.type == "MESH":
-            obj.data.materials.clear()
-            obj.data.materials.append(mat)
+        if obj.type != "MESH":
+            continue
+        if obj.data.materials:
+            for slot in obj.material_slots:
+                src = slot.material.name if slot.material else obj.name
+                color = src.split(".")[0].replace("mat_", "")
+                pal = bpy.data.materials.get(materials.material_name(color))
+                if pal:
+                    slot.material = pal
+        else:
+            color = obj.name.split(".")[0].replace("mat_", "")
+            pal = bpy.data.materials.get(materials.material_name(color))
+            if pal:
+                obj.data.materials.append(pal)
 
     # scale the ship up (Empyrion blocks < DU voxels). obj_import places every
     # group at the world origin with absolute verts, so scaling each mesh about
@@ -271,8 +294,9 @@ def _do_epb_import(self, context, epb, scale, smooth):
                 obj.data.update()
                 done.add(obj.data.name)
 
+    extra = "  Split into per-shape objects (delete the ones you don't want)." if split_by_shape else ""
     self.report({"INFO"}, f"Imported {len(imported)} object(s) from {os.path.basename(epb)} "
-                          f"at {scale:g}x. Tweak, then export.")
+                          f"at {scale:g}x.{extra} Tweak, then export.")
     return {"FINISHED"}
 
 
@@ -304,7 +328,7 @@ class DU_OT_import_epb(bpy.types.Operator):
 
     def invoke(self, context, event):
         pr = preferences.prefs(context)
-        context.window_manager.du_epb_search = ""    # start unfiltered
+        # keep the last search/page so reopening doesn't start over
         # scan incrementally so the UI stays responsive and shows progress
         self._gen = empyrion.scan_iter(pr.empyrion_path)
         self._count = 0
@@ -363,18 +387,26 @@ class DU_OT_import_epb_gallery(bpy.types.Operator):
                     "ships with intentional two-tone panelling/bands",
         default=False,
     )
+    split_by_shape: bpy.props.BoolProperty(
+        name="Separate by block shape",
+        description="Import one object per Empyrion block shape (cubes, ramps, corners, …) "
+                    "so you can select and delete whole shapes. Off = one object per colour",
+        default=False,
+    )
     import_scale: bpy.props.FloatProperty(
         name="Import scale",
-        description="Uniform scale applied to the imported ship (~3x fits a real DU core)",
-        default=3.0, min=0.1, max=20.0,
+        description="Uniform scale applied to the imported ship (~1.5x fits a real DU core)",
+        default=1.5, min=0.1, max=20.0,
     )
 
     def invoke(self, context, event):
         self.import_scale = preferences.prefs(context).epb_import_scale
         wm = context.window_manager
-        wm.du_epb_page = 0
         wm.du_epb_selected = ""
-        return wm.invoke_props_dialog(self, width=720)
+        # restore the last page, clamped to the current (possibly rescanned) range
+        _items, page, _n_pages, _total = empyrion.page_view(context, empyrion.PER_PAGE)
+        wm.du_epb_page = page
+        return wm.invoke_props_dialog(self, width=900)
 
     def draw(self, context):
         layout = self.layout
@@ -391,6 +423,22 @@ class DU_OT_import_epb_gallery(bpy.types.Operator):
         pager.operator("du.epb_page", text="", icon="TRIA_RIGHT").delta = 1
         sub = f" matching {wm.du_epb_search!r}" if wm.du_epb_search else ""
         layout.label(text=f"{total} blueprint(s){sub} — click one to select")
+        with_prev, all_total = empyrion.counts()
+        row2 = layout.row()
+        row2.prop(wm, "du_epb_show_all")
+        if all_total > with_prev:
+            row2.label(text=f"({all_total - with_prev} hidden: no preview)")
+
+        # fit-to-core filter (size read from the .epb header)
+        core = context.scene.du_core_size
+        row3 = layout.row()
+        if core == "AUTO":
+            row3.enabled = False
+            row3.prop(wm, "du_epb_fit_only", text="Only ships that fit the core (pick a core size)")
+        else:
+            edge = core_data.core_build_m(core)
+            row3.prop(wm, "du_epb_fit_only",
+                      text=f"Only ships that fit the {core} core ({edge:g} m) at {self.import_scale:g}x")
 
         # thumbnail grid (PER_PAGE visible at once)
         if items:
@@ -400,7 +448,7 @@ class DU_OT_import_epb_gallery(bpy.types.Operator):
                 cell = grid.column(align=True)
                 selected = (key == wm.du_epb_selected)
                 if icon:
-                    cell.template_icon(icon_value=icon, scale=5.0)
+                    cell.template_icon(icon_value=icon, scale=empyrion.THUMB_SCALE)
                 else:
                     cell.label(text="", icon="IMAGE_DATA")
                 op = cell.operator("du.pick_epb", text=name if len(name) <= 18 else name[:17] + "…",
@@ -412,10 +460,20 @@ class DU_OT_import_epb_gallery(bpy.types.Operator):
         # selection + import options
         layout.separator()
         sel = empyrion.name_for(wm.du_epb_selected)
-        layout.label(text=f"Selected: {sel}" if sel else "Selected: (click a ship above)",
-                     icon="CHECKMARK" if sel else "INFO")
+        if sel:
+            sz = empyrion.du_size_m(empyrion.epb_path_for(wm.du_epb_selected), self.import_scale)
+            txt = f"Selected: {sel}"
+            if sz:
+                txt += f"  —  {sz[0]:.0f} x {sz[1]:.0f} x {sz[2]:.0f} m"
+                if context.scene.du_core_size != "AUTO":
+                    edge = core_data.core_build_m(context.scene.du_core_size)
+                    txt += "   ✓ fits" if max(sz) <= edge + 1e-6 else "   ✗ too big for core"
+            layout.label(text=txt, icon="CHECKMARK")
+        else:
+            layout.label(text="Selected: (click a ship above)", icon="INFO")
         layout.prop(self, "import_scale")
         layout.prop(self, "smooth_grey_speckle")
+        layout.prop(self, "split_by_shape")
 
     def execute(self, context):
         key = context.window_manager.du_epb_selected
@@ -423,7 +481,8 @@ class DU_OT_import_epb_gallery(bpy.types.Operator):
         if not epb:
             self.report({"ERROR"}, "Click a blueprint in the gallery first.")
             return {"CANCELLED"}
-        return _do_epb_import(self, context, epb, self.import_scale, self.smooth_grey_speckle)
+        return _do_epb_import(self, context, epb, self.import_scale, self.smooth_grey_speckle,
+                              self.split_by_shape)
 
 
 class DU_OT_pick_epb(bpy.types.Operator):
@@ -467,10 +526,16 @@ class DU_OT_import_epb_file(bpy.types.Operator):
         description="Consolidate finely-intermixed grey shades into coherent regions",
         default=False,
     )
+    split_by_shape: bpy.props.BoolProperty(
+        name="Separate by block shape",
+        description="Import one object per Empyrion block shape so you can select and delete "
+                    "whole shapes. Off = one object per colour",
+        default=False,
+    )
     import_scale: bpy.props.FloatProperty(
         name="Import scale",
-        description="Uniform scale applied to the imported ship (~3x fits a real DU core)",
-        default=3.0, min=0.1, max=20.0,
+        description="Uniform scale applied to the imported ship (~1.5x fits a real DU core)",
+        default=1.5, min=0.1, max=20.0,
     )
 
     def invoke(self, context, event):
@@ -480,7 +545,7 @@ class DU_OT_import_epb_file(bpy.types.Operator):
 
     def execute(self, context):
         return _do_epb_import(self, context, bpy.path.abspath(self.filepath),
-                              self.import_scale, self.smooth_grey_speckle)
+                              self.import_scale, self.smooth_grey_speckle, self.split_by_shape)
 
 
 class DU_OT_detect_empyrion(bpy.types.Operator):

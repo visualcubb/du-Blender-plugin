@@ -31,11 +31,15 @@ icons and readable names, sized to the actual part dimensions:
 
 ## Features
 - **Pick a core size** (XS–XXXL) and get a correctly-sized build-volume box, with metric
-  units and 0.25 m grid snapping.
+  units (grid snapping optional via the magnet toggle; parts move freely).
+- **Choose the construct type** — Dynamic (a ship), Static (a planet-anchored base), or
+  Space (a station) — so the blueprint deploys on the right core.
 - **Paint with the DU palette** — honeycomb colours mapped to in-game materials.
 - **Element placeholders** — drop correctly-sized proxies of any engine, wing, container,
   seat, cannon, fuel tank, etc., with the real in-game icon, to check fitment.
 - **One-click export** to a `.blueprint` you import in DU. **1 Blender metre = 1 DU metre.**
+- **Hollow interiors** — the export leaves the inside of the hull hollow (keeping a thin solid
+  shell), so ships and bases use far less honeycomb without changing how they look.
 
 ## Requirements
 - **Blender 4.2+** (works on 5.x).
@@ -58,7 +62,9 @@ icons and readable names, sized to the actual part dimensions:
 
 ## Quick start
 Open the **DU** tab in the 3D viewport sidebar (press **N**):
-1. **Core** → choose a size → **Set Up DU Core** (draws the build box, sets 0.25 m snapping).
+1. **Core** → choose the **Type** (Dynamic = ship, Static = base, Space = station) and a
+   **Size** → **Set Up DU Core** (draws the build box, sets metric units).
+   Parts and meshes move freely; toggle the **magnet** for grid snapping when aligning the hull.
 2. Model your hull. 1 unit = 1 metre = 1 DU metre.
 3. **Materials → Create DU Materials**, assign them to faces (`white/grey/darkgray/black`
    neutrals, `blue/green/red/yellow` accents — all remappable in-game).
@@ -70,11 +76,12 @@ Open the **DU** tab in the 3D viewport sidebar (press **N**):
 The add-on writes an OBJ grouped as `o mat_<color>` objects and runs:
 
 ```
-du-blueprint generate <name>.obj <name>.blueprint -t dynamic --scale 1 -s <core> -n <name>
+du-blueprint generate <name>.obj <name>.blueprint -t <dynamic|static|space> --scale 1 -s <core> -n <name>
 ```
 
-`du-blueprint` dual-contours the mesh, bakes the LOD pyramid, picks/uses the core, and assigns
-materials. Coordinates are pre-scaled so the in-game size matches what you modelled.
+`du-blueprint` dual-contours the mesh, bakes the LOD pyramid, picks/uses the core, assigns
+materials, and hollows the interior to a thin solid shell. Coordinates are pre-scaled so the
+in-game size matches what you modelled.
 
 ## Advanced: import an Empyrion blueprint
 The **Import Empyrion Blueprint** button converts an Empyrion ship to a mesh you can edit
@@ -86,9 +93,11 @@ ship's in-game preview screenshot:
   to filter by name. Click a thumbnail to select it, then press OK to import.
 - A progress count shows in the status bar while it scans (libraries with thousands of Workshop
   blueprints can take a moment; press Esc to cancel).
-- Imported ships are **scaled ×3 by default** (Empyrion blocks are smaller than DU voxels, so
-  most ships need roughly 3× to fit a real core). Change the factor in the import dialog, or set
+- Imported ships are **scaled ×1.5 by default** (Empyrion blocks are smaller than DU voxels, so
+  most ships need roughly 1.5× to fit a real core). Change the factor in the import dialog, or set
   a new default under **Empyrion import scale** in preferences.
+- Tick **Separate by block shape** to import one object per Empyrion shape (cubes, ramps, corners,
+  …) so you can select and delete whole shapes in the Outliner. (Default off = one object per colour.)
 - The Empyrion folder is **auto-detected from Steam**; if it isn't found, set
   **Empyrion install folder** in preferences (or hit Detect).
 - Use **Browse for .epb file…** to import an `.epb` from anywhere else instead.
