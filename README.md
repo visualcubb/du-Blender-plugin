@@ -72,6 +72,32 @@ Open the **DU** tab in the 3D viewport sidebar (press **N**):
    (Placeholders are guides only; they aren't exported.)
 5. **Export → Export DU Blueprint** → import the `.blueprint` in DU.
 
+## Colouring your ship
+Colours are ordinary Blender **materials** — each DU palette colour is a material carrying a
+`du_color` tag the exporter reads.
+
+1. **Create the palette (once per file):** DU panel → **Materials** → **Create DU Materials**.
+   This adds 8 materials:
+   - Neutrals (Aluminium pattern): `DU_white`, `DU_grey`, `DU_darkgray`, `DU_black`
+   - Accents (Steel tile): `DU_blue`, `DU_green`, `DU_red`, `DU_yellow`
+2. **Assign a colour:**
+   - *Whole object* — select it → **Material Properties** (sphere icon) → in the slot, use the
+     material browse dropdown to pick e.g. `DU_red`.
+   - *Part of an object (per-face)* — select the object, press **Tab** for Edit Mode, select the
+     faces (box-select, or hover + **L** for a connected piece), then in **Material Properties**
+     add a slot (**+**) if needed, browse-pick the `DU_` colour into it, and click **Assign**.
+     Repeat for other regions.
+3. **See the colours:** set the viewport shading (top-right) to **Material Preview** or **Solid**.
+   The Materials box also shows `Active: red` for the selected face.
+4. **Export:** every face's `DU_` material becomes that colour in the blueprint. In-game DU asks
+   you to confirm one material but keeps the per-face colours (all remappable in-game afterwards).
+
+Two things to watch:
+- Only `DU_` materials export as colour — any other material (Blender's default, an imported
+  texture, etc.) falls back to **white**, so always assign from the `DU_` set.
+- For an **imported Empyrion ship** the `DU_` materials are already assigned per face/shape, so
+  recolouring is just assigning a different `DU_` colour to the faces you want to change.
+
 ## How it works
 The add-on writes an OBJ grouped as `o mat_<color>` objects and runs:
 
